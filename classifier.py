@@ -1,13 +1,11 @@
-from typing import Union, Dict, Iterable, List, Tuple, Set
-
+from typing import Union, Dict, Iterable, Tuple, Set
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import os.path
-
-from sklearn.svm import SVC
-from sklearn.tree import DecisionTreeClassifier
 from sklearn.metrics import plot_confusion_matrix
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.svm import SVC
 
 pd.options.mode.chained_assignment = None
 # pd.set_option('display.max_columns', None)
@@ -16,6 +14,9 @@ pd.options.mode.chained_assignment = None
 """
 NumPy, pandas, sklearn and matplotlib are required.
 To run, ensure DATA_FOLDER points to the folder containing the uncompressed .csv data files.
+Either launch from IDLE or the console, the first output is the dataset ratios (if enabled),
+next the random forest accuracy score and confusion matrix are output and finally the support-
+vector machine accuracy score and confusion matrix are output.
 DATA_SEED should remain constant to avoid cross-contamination between training and testing sets.
 Change OUTPUTS to toggle the various outputs
 Change METHODS to toggle the methods being run
@@ -25,8 +26,17 @@ DATA_FOLDER: str = "./datasets/"
 DATA_SEED: int = 123
 
 FEATURES: Dict[str, Union[Set[str], Dict[str, Dict[str, int]]]] = {
-    "con": {"num_of_prev_attempts", "studied_credits", "predicted_score"},
-    "cat": {"region"},
+    # Continuous data
+    "con": {
+        "num_of_prev_attempts",
+        "studied_credits",
+        "predicted_score"
+    },
+    # Unordered/un-mappable categorical data
+    "cat": {
+        "region"
+    },
+    # Ordered/mappable categorical data
     "cat_map": {
         "highest_education": {
             "No Formal quals": 0,
@@ -59,21 +69,25 @@ FEATURES: Dict[str, Union[Set[str], Dict[str, Dict[str, int]]]] = {
     }
 }
 
+# ML method control and hyperparameters
 METHODS: Dict[str, Dict[str, Union[bool, float, int, str]]] = {
-    "decision_tree": {
-        "enabled": False,
-        "criterion": "gini"
+    "random_forest": {
+        "enabled": True,
+        "random_seed": 321,
+        "estimator_count": 100,
+        "max_depth": None,
+        "min_leaf_samples": 1
     },
     "support_vector": {
         "enabled": True,
         "c_value": 1.0,
         "class_comparator": "ovr",
-        "kernel": "linear"
+        "kernel": "rbf"
     }
 }
 
 OUTPUTS: Dict[str, bool] = {
-    "set_ratios": False,
+    "set_ratios": True,
     "accuracy_scores": True,
     "confusion_matrices": True
 }
@@ -108,14 +122,14 @@ def split_data(data, train_ratio: float, seed: Union[int, None] = None) -> Tuple
     return data.iloc[indices[:train_size]], data.iloc[indices[train_size:]]
 
 
-def train_and_test_model(model, train, test, categories) -> None:
+def train_and_test_model(model, train, test, cmap) -> None:
     """
     Train and test a model
 
     :param model: The model to train and test
     :param train: A tuple containing the training samples and labels
     :param test: A tuple contain the testing samples and labels
-    :param categories: The set of possible output category labels
+    :param cmap: The colour map for the confusion matrix
     :return: None
     """
 
@@ -132,8 +146,7 @@ def train_and_test_model(model, train, test, categories) -> None:
     if OUTPUTS["confusion_matrices"]:
         # Calculate and output a confusion matrix based on the test data
         plot_confusion_matrix(model, test_samples, test_labels,
-                              display_labels=categories,
-                              cmap="Blues",
+                              cmap=cmap,
                               normalize="true")
         plt.show()
 
@@ -167,13 +180,20 @@ if __name__ == "__main__":
         for feature, feature_map in FEATURES["cat_map"].items():
             data[feature] = data[feature].map(feature_map)
 
-        # One-hot encode un-mappable categorical features
-        one_hot = pd.get_dummies(data[FEATURES["cat"]], drop_first=True)
-        data = data.join(one_hot)
-        data.drop("region", "columns")
+        features = FEATURES["con"] | FEATURES["cat_map"].keys()
+        if len(FEATURES["cat"]) > 0:
+            # One-hot encode un-mappable categorical features
+            one_hot = pd.get_dummies(data[FEATURES["cat"]], drop_first=True)
+            data = data.join(one_hot)
+            data.drop(FEATURES["cat"], "columns")
+            features |= set(one_hot.columns)
+
+        assert len(features) > 0
+
+        print("Using feature set: ", features)
 
         # Split sample data in to training and testing set
-        train, test = split_data(data, 0.75, DATA_SEED)
+        train, test = split_data(data[list(features) + ["final_result"]], 0.75, DATA_SEED)
 
         if OUTPUTS["set_ratios"]:
             # Output a stacked bar chart showing the outcome distributions within the two datasets
@@ -189,26 +209,29 @@ if __name__ == "__main__":
             plt.show()
 
         # Fetch the training features and labels from the training set
-        train_samples = train[FEATURES["con"] | set(one_hot.columns) | FEATURES["cat_map"].keys()]
-        train_labels = train.final_result
+        train_set = train[features], train["final_result"]
 
         # Fetch the testing features and labels from the testing set
-        test_samples = test[FEATURES["con"] | set(one_hot.columns) | FEATURES["cat_map"].keys()]
-        test_labels = test.final_result
+        test_set = test[features], test["final_result"]
 
-        categories = data.final_result.unique()
-
-        dt_options = METHODS["decision_tree"]
-        if dt_options["enabled"]:
-            dt = DecisionTreeClassifier(criterion=dt_options["criterion"])
-            train_and_test_model(dt, (test_samples, test_labels), (train_samples, train_labels), categories)
+        rf_options = METHODS["random_forest"]
+        if rf_options["enabled"]:
+            # Create, train and test the Random Forest classifier
+            rf = RandomForestClassifier(
+                n_estimators=rf_options["estimator_count"],
+                random_state=rf_options["random_seed"],
+                max_depth=rf_options["max_depth"],
+                min_samples_leaf=rf_options["min_leaf_samples"]
+            )
+            train_and_test_model(rf, train_set, test_set, "Blues")
         sv_options = METHODS["support_vector"]
         if sv_options["enabled"]:
+            # Create, train and test the Support-Vector classifier
             sv = SVC(
                 sv_options["c_value"], sv_options["kernel"],
                 decision_function_shape=sv_options["class_comparator"]
             )
-            train_and_test_model(sv, (test_samples, test_labels), (train_samples, train_labels), categories)
+            train_and_test_model(sv, train_set, test_set, "Reds")
 
         return 0
 
